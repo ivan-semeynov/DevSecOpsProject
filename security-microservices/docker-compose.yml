@@ -1,0 +1,35 @@
+
+services:
+  # 1. Policy Manager - главный сервис (порт 8000)
+  policy-manager:
+    build: ./policy-manager
+    ports:
+      - "8000:8000"
+    environment:
+      - SECRET_SCANNER_URL=http://secret-scanner:8001
+      - TERRAFORM_VALIDATOR_URL=http://terraform-validator:8002
+      - SECURITY_AUDITOR_URL=http://security-auditor:8003
+
+  # 2. Secret Scanner - ищет секреты в коде (порт 8001)
+  secret-scanner:
+    build: ./secret-scanner
+    ports:
+      - "8001:8001"
+    environment:
+      - POLICY_MANAGER_URL=http://policy-manager:8000
+
+  # 3. Terraform Validator - проверяет Terraform (порт 8002)
+  terraform-validator:
+    build: ./terraform-validator
+    ports:
+      - "8002:8002"
+    environment:
+      - POLICY_MANAGER_URL=http://policy-manager:8000
+
+  # 4. Security Auditor - финальная проверка (порт 8003)
+  security-auditor:
+    build: ./security-auditor
+    ports:
+      - "8003:8003"
+    environment:
+      - POLICY_MANAGER_URL=http://policy-manager:8000
