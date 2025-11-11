@@ -6,9 +6,9 @@ router = APIRouter()
 
 # Конфигурация сервисов
 SERVICES = {
-    "secret_scanner": "http://secret-scanner:8001",
-    "terraform_validator": "http://terraform-validator:8002", 
-    "security_auditor": "http://security-auditor:8003"
+    "secret_scanner": "http://localhost:8001",
+    "terraform_validator": "http://localhost:8002", 
+    "security_auditor": "http://localhost:8003"
 }
 
 @router.get("/policies/s3")

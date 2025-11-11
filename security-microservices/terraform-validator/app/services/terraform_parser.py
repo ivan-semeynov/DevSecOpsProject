@@ -2,23 +2,42 @@ class TerraformParser:
     def find_s3_buckets(self, terraform_code):
         """Поиск S3 бакетов в Terraform коде"""
         buckets = []
-        code_str = str(terraform_code)
         
-        # Имитация поиска S3 ресурсов
-        if "s3_bucket" in code_str or "storage_bucket" in code_str:
-            buckets.append({"name": "app-backup-bucket", "acl": "private"})
-            buckets.append({"name": "logs-bucket", "acl": "public-read"})  # Нарушение!
+        # Парсим реальный terraform_code вместо тестовых данных
+        if isinstance(terraform_code, dict):
+            resources = terraform_code.get("resource", {})
+            s3_buckets = resources.get("yandex_storage_bucket", {})
+            
+            for bucket_name, bucket_config in s3_buckets.items():
+                buckets.append({
+                    "name": bucket_name,
+                    "acl": bucket_config.get("acl", "private")
+                })
         
         return buckets
     
     def find_iam_roles(self, terraform_code):
         """Поиск IAM ролей в Terraform коде"""
         roles = []
-        code_str = str(terraform_code)
         
-        # Имитация поиска IAM ресурсов
-        if "iam_role" in code_str or "service_account" in code_str:
-            roles.append({"name": "monitoring-role", "role": "admin"})  # Нарушение!
-            roles.append({"name": "backup-role", "role": "viewer"})
+        if isinstance(terraform_code, dict):
+            resources = terraform_code.get("resource", {})
+            
+            # Ищем IAM роли
+            iam_roles = resources.get("yandex_iam_service_account", {})
+            for role_name, role_config in iam_roles.items():
+                roles.append({
+                    "name": role_name,
+                    "role": "admin" if "admin" in role_name else "viewer"  # Упрощенная логика
+                })
+            
+            # Ищем IAM binding
+            iam_bindings = resources.get("yandex_resourcemanager_folder_iam_binding", {})
+            for binding_name, binding_config in iam_bindings.items():
+                role = binding_config.get("role", "viewer")
+                roles.append({
+                    "name": binding_name,
+                    "role": role
+                })
         
         return roles
