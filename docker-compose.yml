@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  policy-manager:
+    build: ./services/policy-manager
+    container_name: policy-manager
+    ports:
+      - "8000:8000"
+    environment:
+      # можно не указывать — в коде есть дефолты на эти значения
+      SECRET_SCANNER_URL: http://secret-scanner:8000
+      TERRAFORM_VALIDATOR_URL: http://terraform-validator:8000
+      SECURITY_AUDITOR_URL: http://security-auditor:8000
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: admin
+      S3_SECRET_KEY: password123
+      S3_BUCKET: security-results
+    depends_on:
+      - secret-scanner
+      - terraform-validator
+      - security-auditor
+      - minio
+
+  secret-scanner:
+    build: ./services/secret-scanner
+    container_name: secret-scanner
+    ports:
+      - "8001:8000"
+
+  terraform-validator:
+    build: ./services/terraform-validator
+    container_name: terraform-validator
+    ports:
+      - "8002:8000"
+
+  security-auditor:
+    build: ./services/security-auditor
+    container_name: security-auditor
+    ports:
+      - "8003:8000"
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Web-консоль
+    volumes:
+      - ./minio-data:/data
