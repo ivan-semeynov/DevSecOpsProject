@@ -2,7 +2,7 @@
 import json
 import os
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 
 def collect_resources(module: Dict[str, Any], acc: List[Dict[str, Any]]) -> None:
@@ -12,57 +12,13 @@ def collect_resources(module: Dict[str, Any], acc: List[Dict[str, Any]]) -> None
         collect_resources(child, acc)
 
 
-def normalize_resources(tf_resources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Приводим ресурсы из terraform show -json к формату:
-    {type, name, config}
-    + "приклеиваем" public access block к aws_s3_bucket, если он задан отдельным ресурсом
-    """
-    buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}  # key=(type,name) -> normalized bucket
-    pab_by_bucket_name: Dict[str, Dict[str, Any]] = {}   # key=bucket name -> pab values
-
-    normalized: List[Dict[str, Any]] = []
-
-    # 1) Сначала соберём public access block ресурсы
-    for r in tf_resources:
-        if r.get("type") == "aws_s3_bucket_public_access_block":
-            values = r.get("values", {}) or {}
-            # values.bucket может быть bucket id/arn, но часто совпадает с именем бакета
-            # Для учебного стенда будем пытаться сопоставить по строке bucket.
-            bucket_ref = values.get("bucket")
-            if isinstance(bucket_ref, str) and bucket_ref:
-                pab_by_bucket_name[bucket_ref] = values
-
-    # 2) Теперь нормализуем ресурсы и “приклеим” PAB к bucket, если сможем
-    for r in tf_resources:
-        r_type = r.get("type")
-        r_name = r.get("name")
-        values = r.get("values", {}) or {}
-
-        item = {
-            "type": r_type,
-            "name": r_name,
-            "config": values,
-        }
-
-        # Если это bucket — попробуем добавить public_access_block_configuration
-        if r_type == "aws_s3_bucket":
-            # в values.bucket обычно строка имени бакета
-            bucket_name = values.get("bucket")
-            if isinstance(bucket_name, str) and bucket_name in pab_by_bucket_name:
-                pab = pab_by_bucket_name[bucket_name]
-                item["config"]["public_access_block_configuration"] = {
-                    "block_public_acls": pab.get("block_public_acls", True),
-                    "ignore_public_acls": pab.get("ignore_public_acls", True),
-                    "block_public_policy": pab.get("block_public_policy", True),
-                    "restrict_public_buckets": pab.get("restrict_public_buckets", True),
-                }
-
-            buckets[(r_type, r_name)] = item
-
-        normalized.append(item)
-
-    return normalized
+def to_public_access_block_cfg(pab_values: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "block_public_acls": pab_values.get("block_public_acls", True),
+        "ignore_public_acls": pab_values.get("ignore_public_acls", True),
+        "block_public_policy": pab_values.get("block_public_policy", True),
+        "restrict_public_buckets": pab_values.get("restrict_public_buckets", True),
+    }
 
 
 def main() -> None:
@@ -74,21 +30,62 @@ def main() -> None:
     with open(tfplan_path, "r", encoding="utf-8") as f:
         plan = json.load(f)
 
-    raw_resources: List[Dict[str, Any]] = []
+    raw: List[Dict[str, Any]] = []
     root_module = plan.get("planned_values", {}).get("root_module", {}) or {}
-    collect_resources(root_module, raw_resources)
+    collect_resources(root_module, raw)
 
-    resources = normalize_resources(raw_resources)
+    # Соберём PublicAccessBlock ресурсы:
+    # 1) по имени terraform-ресурса (самый надёжный матч)
+    pab_by_name: Dict[str, Dict[str, Any]] = {}
+    # 2) по values.bucket (запасной матч)
+    pab_by_bucket_value: Dict[str, Dict[str, Any]] = {}
+
+    for r in raw:
+        if r.get("type") == "aws_s3_bucket_public_access_block":
+            name = r.get("name")
+            values = r.get("values", {}) or {}
+            if isinstance(name, str) and name:
+                pab_by_name[name] = values
+            b = values.get("bucket")
+            if isinstance(b, str) and b:
+                pab_by_bucket_value[b] = values
+
+    normalized: List[Dict[str, Any]] = []
+
+    for r in raw:
+        r_type = r.get("type")
+        r_name = r.get("name")
+        values = r.get("values", {}) or {}
+
+        item = {"type": r_type, "name": r_name, "config": values}
+
+        if r_type == "aws_s3_bucket" and isinstance(r_name, str):
+            # 1) Склейка по имени ресурса (bucket.safe_logs ↔ pab.safe_logs)
+            if r_name in pab_by_name:
+                item["config"]["public_access_block_configuration"] = to_public_access_block_cfg(
+                    pab_by_name[r_name]
+                )
+            else:
+                # 2) запасной вариант: по строке bucket в values
+                bucket_name = values.get("bucket")
+                if isinstance(bucket_name, str) and bucket_name in pab_by_bucket_value:
+                    item["config"]["public_access_block_configuration"] = to_public_access_block_cfg(
+                        pab_by_bucket_value[bucket_name]
+                    )
+
+        normalized.append(item)
 
     pipeline_id = os.getenv("CI_PIPELINE_ID") or os.getenv("GITHUB_RUN_ID") or "local_run"
-    repository_url = os.getenv("CI_PROJECT_URL") or (
-        (os.getenv("GITHUB_SERVER_URL", "") + "/" + os.getenv("GITHUB_REPOSITORY", "")).strip("/")
-    ) or "local_repo"
+    repo_url = (
+        os.getenv("CI_PROJECT_URL")
+        or (os.getenv("GITHUB_SERVER_URL", "") + "/" + os.getenv("GITHUB_REPOSITORY", "")).strip("/")
+        or "local_repo"
+    )
 
     payload = {
-        "terraform_code": {"resources": resources},
+        "terraform_code": {"resources": normalized},
         "pipeline_id": pipeline_id,
-        "repository_url": repository_url,
+        "repository_url": repo_url,
     }
 
     json.dump(payload, sys.stdout)
