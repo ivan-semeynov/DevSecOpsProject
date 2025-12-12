@@ -1,0 +1,143 @@
+name: Security Gate (Terraform -> Policy Manager)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+
+jobs:
+  security_gate:
+    runs-on: ubuntu-latest
+
+    env:
+      COMPOSE_PROJECT_NAME: securitycicd
+      TF_ROOT: infra/terraform
+      POLICY_MANAGER_URL: http://localhost:8000
+
+      # MinIO из docker-compose сети доступен по имени сервиса "minio"
+      TF_VAR_minio_access_key: admin
+      TF_VAR_minio_secret_key: password123
+      TF_VAR_minio_endpoint: http://minio:9000
+
+      TF_IMAGE: hashicorp/terraform:1.9.8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build and start security stack
+        run: |
+          docker compose up -d --build
+          docker compose ps
+
+      - name: Wait for Policy Manager health
+        run: |
+          set -e
+          for i in {1..60}; do
+            if curl -fsS "$POLICY_MANAGER_URL/api/v1/health" >/dev/null; then
+              echo "Policy Manager is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Policy Manager did not become healthy"
+          docker compose logs --no-color policy-manager
+          exit 1
+
+      - name: Terraform init (Docker)
+        run: |
+          docker run --rm -i \
+            --network "${COMPOSE_PROJECT_NAME}_default" \
+            -v "${{ github.workspace }}/${TF_ROOT}:/workspace" \
+            -w /workspace \
+            -e TF_VAR_minio_access_key \
+            -e TF_VAR_minio_secret_key \
+            -e TF_VAR_minio_endpoint \
+            $TF_IMAGE \
+            init -backend=false
+
+      - name: Terraform plan (Docker)
+        run: |
+          docker run --rm -i \
+            --network "${COMPOSE_PROJECT_NAME}_default" \
+            -v "${{ github.workspace }}/${TF_ROOT}:/workspace" \
+            -w /workspace \
+            -e TF_VAR_minio_access_key \
+            -e TF_VAR_minio_secret_key \
+            -e TF_VAR_minio_endpoint \
+            $TF_IMAGE \
+            plan -out=tfplan
+
+      - name: Terraform show -json (Docker)
+        run: |
+          docker run --rm -i \
+            --network "${COMPOSE_PROJECT_NAME}_default" \
+            -v "${{ github.workspace }}/${TF_ROOT}:/workspace" \
+            -w /workspace \
+            $TF_IMAGE \
+            show -json tfplan > "${TF_ROOT}/tfplan.json"
+
+      - name: Build payload.json
+        run: |
+          python tools/tfplan_to_security_payload.py "${TF_ROOT}/tfplan.json" > payload.json
+
+      - name: Call Policy Manager (gate)
+        run: |
+          set -e
+
+          HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" \
+            -X POST "$POLICY_MANAGER_URL/api/v1/validate/terraform" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json)
+
+          echo "HTTP_CODE=$HTTP_CODE"
+          cat response.json
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Security gate failed: HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          APPROVED=$(python - <<'PY'
+          import json
+          data=json.load(open("response.json",encoding="utf-8"))
+          print(str(data.get("approved")).lower())
+          PY
+          )
+
+          if [ "$APPROVED" != "true" ]; then
+            echo "BLOCKED: approved=false"
+            exit 1
+          fi
+
+          echo "APPROVED"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-gate-artifacts
+          path: |
+            payload.json
+            response.json
+            ${{ env.TF_ROOT }}/tfplan.json
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color policy-manager
+          docker compose logs --no-color secret-scanner
+          docker compose logs --no-color terraform-validator
+          docker compose logs --no-color security-auditor
+
+      - name: Shutdown
+        if: always()
+        run: |
+          docker compose down -v
