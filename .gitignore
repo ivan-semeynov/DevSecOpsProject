@@ -1,1 +1,22 @@
+# MinIO data
 minio-data/
+minio/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+tfplan.json
+crash.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# CI artifacts
+payload.json
+response.json
