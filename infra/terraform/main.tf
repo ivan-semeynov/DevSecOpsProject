@@ -7,7 +7,7 @@ terraform {
   }
 }
 
-# Это НЕ реальный AWS, а MinIO (S3-совместимый endpoint)
+# Провайдер AWS, работающий с MinIO (S3-совместимое хранилище)
 provider "aws" {
   region                      = "us-east-1"
   access_key                  = var.minio_access_key
@@ -17,10 +17,13 @@ provider "aws" {
   skip_requesting_account_id  = true
 
   endpoints {
-    # ВАЖНО: для Terraform в Docker MinIO доступен по host.docker.internal
     s3 = var.minio_endpoint
   }
 }
+
+# -------------------------
+# Переменные
+# -------------------------
 
 variable "minio_access_key" {
   type      = string
@@ -33,20 +36,49 @@ variable "minio_secret_key" {
 }
 
 variable "minio_endpoint" {
-  type    = string
-  default = "http://host.docker.internal:9000"
+  type = string
 }
 
-# Безопасный бакет (после добавления public_access_block будет реально ок)
+# -------------------------
+# Безопасный S3-бакет
+# -------------------------
+
 resource "aws_s3_bucket" "safe_logs" {
   bucket = "safe-logs-bucket"
   acl    = "private"
 
-  # ниже блок добавим позже, когда будем показывать "зелёный" сценарий
+  tags = {
+    Name        = "safe-logs-bucket"
+    Environment = "demo"
+    ManagedBy   = "terraform"
+  }
 }
 
-# Опасный бакет (для демонстрации сценария 1)
-resource "aws_s3_bucket" "dangerous_logs" {
-  bucket = "dangerous-logs-bucket"
-  acl    = "public-read"  # <-- должен ломать пайплайн
+# Явная блокировка любого публичного доступа
+resource "aws_s3_bucket_public_access_block" "safe_logs" {
+  bucket                  = aws_s3_bucket.safe_logs.id
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+
+# (Опционально) Шифрование на стороне сервера
+resource "aws_s3_bucket_server_side_encryption_configuration" "safe_logs" {
+  bucket = aws_s3_bucket.safe_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# (Опционально) Версионирование — плюс к безопасности
+resource "aws_s3_bucket_versioning" "safe_logs" {
+  bucket = aws_s3_bucket.safe_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
